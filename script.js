@@ -23,8 +23,8 @@ const START_FEN = [
 
 // 棋子价值 (用于 AI 评估)
 const PIECE_VALUES = {
-    'k': 10000, 'a': 200, 'b': 200, 'n': 450, 'r': 1000, 'c': 500, 'p': 100,
-    'K': 10000, 'A': 200, 'B': 200, 'N': 450, 'R': 1000, 'C': 500, 'P': 100
+    'k': 10000, 'a': 250, 'b': 250, 'n': 400, 'r': 1000, 'c': 450, 'p': 100,
+    'K': 10000, 'A': 250, 'B': 250, 'N': 400, 'R': 1000, 'C': 450, 'P': 100
 };
 
 // 汉字映射
@@ -40,8 +40,14 @@ let selectedIndex = -1;
 let lastMove = null; // {from, to}
 let history = [];
 let gameOver = false;
-let aiWorker = null; // 预留 Web Worker
 let searchDepth = 4; // AI 搜索深度
+let isAiThinking = false;
+
+// AI 全局变量
+let zobristTable = [];
+let turnHash = 0n;
+let tt = new Map();
+const TT_SIZE_LIMIT = 1000000;
 
 // DOM 元素
 const boardEl = document.getElementById('board');
@@ -61,7 +67,12 @@ function initGame() {
     lastMove = null;
     history = [];
     gameOver = false;
+    isAiThinking = false;
     searchDepth = parseInt(difficultySelect.value);
+    
+    // 初始化 Zobrist
+    initZobrist();
+    tt.clear();
     
     updateStatus();
     renderBoard();
@@ -91,6 +102,7 @@ function renderBoard() {
             const pieceEl = document.createElement('div');
             pieceEl.className = `piece ${isRed(piece) ? 'red' : 'black'}`;
             pieceEl.textContent = PIECE_CHARS[piece];
+            pieceEl.id = `piece-${i}`; // 给每个棋子唯一ID，方便动画定位（虽然重绘会销毁）
             
             if (i === selectedIndex) {
                 pieceEl.classList.add('selected');
@@ -104,9 +116,8 @@ function renderBoard() {
         }
 
         // 标记可行走位置 (如果选中了棋子)
-        if (selectedIndex !== -1 && !gameOver) {
-            const possibleMoves = getValidMoves(board, turn); // 这里效率较低，实际应该缓存
-            // 过滤出当前选中棋子的移动
+        if (selectedIndex !== -1 && !gameOver && turn === 'red') {
+            const possibleMoves = getValidMoves(board, turn);
             const myMoves = possibleMoves.filter(m => m.from === selectedIndex);
             const move = myMoves.find(m => m.to === i);
             if (move) {
@@ -128,9 +139,16 @@ function updateStatus() {
     turnIndicator.style.color = turn === 'red' ? "#c00" : "#000";
     
     if (turn === 'black') {
-        aiStatus.textContent = "AI 正在计算...";
-        // 延迟一下让 UI 刷新
-        setTimeout(makeAiMove, 50);
+        if (!isAiThinking) {
+            isAiThinking = true;
+            aiStatus.textContent = "AI 正在计算...";
+            
+            // 使用 setTimeout 让 UI 有机会渲染“AI 正在计算”
+            // 避免主线程直接阻塞导致文字不更新
+            setTimeout(() => {
+                runAiMove();
+            }, 100);
+        }
     } else {
         aiStatus.textContent = "等待玩家...";
     }
@@ -143,7 +161,7 @@ function playSound() {
 
 // --- 交互逻辑 ---
 function handleCellClick(index) {
-    if (gameOver || turn === 'black') return;
+    if (gameOver || turn === 'black' || isAiThinking) return;
 
     const piece = board[index];
     
@@ -161,10 +179,6 @@ function handleCellClick(index) {
         
         if (move) {
             makeMove(move);
-        } else {
-            // 点击无效位置，取消选中
-            // selectedIndex = -1; // Optional: click empty space to deselect
-            // renderBoard();
         }
     }
 }
@@ -175,17 +189,50 @@ function makeMove(move) {
     history.push({
         move: move,
         captured: captured,
-        boardSnapshot: [...board], // 简单粗暴的状态保存
+        boardSnapshot: [...board],
         turn: turn
     });
 
+    // 简易动画效果
+    // 找到移动前的棋子 DOM
+    // 由于我们每次 renderBoard 都是重绘，这里的动画需要一点技巧
+    // 方案：先不重绘，计算位置差，应用 transform，transitionend 后再重绘数据
+    
+    const fromCell = boardEl.children[move.from];
+    const pieceEl = fromCell.querySelector('.piece');
+    
+    if (pieceEl) {
+        const toCell = boardEl.children[move.to];
+        
+        // 计算距离
+        const fromRect = fromCell.getBoundingClientRect();
+        const toRect = toCell.getBoundingClientRect();
+        const dx = toRect.left - fromRect.left;
+        const dy = toRect.top - fromRect.top;
+        
+        // 应用动画类
+        pieceEl.classList.add('piece-moving');
+        pieceEl.style.transform = `translate(${dx}px, ${dy}px)`;
+        
+        // 播放声音
+        playSound();
+        
+        // 等待动画结束更新数据
+        setTimeout(() => {
+            finishMove(move, captured);
+        }, 300); // 300ms 与 CSS transition 一致
+    } else {
+        // Fallback if no element (e.g. AI fast move)
+        finishMove(move, captured);
+    }
+}
+
+function finishMove(move, captured) {
     // 执行移动
     board[move.to] = board[move.from];
     board[move.from] = null;
     lastMove = move;
     selectedIndex = -1;
-    
-    playSound();
     
     // 检查是否结束
     const kingChar = turn === 'red' ? 'k' : 'K'; // 对方将帅
@@ -208,7 +255,7 @@ function undoMove() {
     
     // 如果是玩家回合，通常需要悔两步（回到玩家上一步）
     // 如果 AI 还在思考，禁止悔棋
-    if (turn === 'black') return;
+    if (isAiThinking) return;
 
     // 回退一步（黑方）
     let state = history.pop();
@@ -227,6 +274,7 @@ function undoMove() {
     updateStatus();
     updateHistoryUI();
 }
+
 
 function updateHistoryUI() {
     historyPanel.innerHTML = '';
@@ -515,211 +563,208 @@ function generatePawnMoves(board, idx, r, c, isRed, moves) {
     }
 }
 
-// --- AI 核心 ---
+// --- AI 核心代码 (主线程版) ---
 
-// 位置估值表 (PST) - 简化版
-// 数值越高越好
-// 数组映射：0-89
-const PST = {
-    // 兵 (Red) - 翻转后用于 Black
-    'P': [
-        0,  0,  0,  0,  0,  0,  0,  0,  0, // 0 (Black baseline)
-        0,  0,  0,  0,  0,  0,  0,  0,  0,
-        0,  0,  0,  0,  0,  0,  0,  0,  0, // 未过河
-        10, 0, 10,  0, 10,  0, 10,  0, 10, // 3 
-        10, 0, 10,  0, 10,  0, 10,  0, 10, // 4
-        20, 20, 20, 20, 20, 20, 20, 20, 20, // 5 过河
-        30, 30, 40, 50, 60, 50, 40, 30, 30, // 6
-        40, 40, 50, 60, 70, 60, 50, 40, 40, // 7
-        50, 50, 60, 70, 80, 70, 60, 50, 50, // 8
-        0,  0,  0,  0,  0,  0,  0,  0,  0  // 9 (Red baseline)
-    ].reverse(), // 因为 Red 在下方 (index 81-89)，但我们的 PST 通常定义为上方进攻下方。
-                 // 让我们重新定义 PST：以 index 0 为 Top (Black side)
-                 // Red P 位于 Bottom，向上走。
-                 // Index 0 是 Red 的目标。
-                 // 所以上面的数组应该是：index 0 是高分，index 89 是低分。
-                 // 默认定义的顺序是从 0..89。
-                 // Red P 在 index 0 行得分最高。
-                 // 所以上述数组不需要 reverse，直接用即可（0行是黑底，红兵到这很强）。
-    
-    // 简化处理：我们动态计算 value
-};
-
-function getPieceValue(piece, index) {
-    const baseVal = PIECE_VALUES[piece];
-    let positionVal = 0;
-    
-    const row = getRow(index);
-    const col = getCol(index);
-    const isRedPiece = isRed(piece);
-    
-    // 简单的位置加成
-    if (piece.toLowerCase() === 'p') {
-        // 兵
-        if (isRedPiece) {
-            if (row < 5) positionVal += 30; // 过河
-            if (row < 2) positionVal += 20; // 逼近九宫
-        } else {
-            if (row > 4) positionVal += 30;
-            if (row > 7) positionVal += 20;
-        }
-    } else if (piece.toLowerCase() === 'n') {
-        // 马：喜欢中间
-        if (col > 2 && col < 6) positionVal += 10;
-        if (!isRedPiece && row > 4) positionVal += 10; // 进攻
-        if (isRedPiece && row < 5) positionVal += 10;
-    } else if (piece.toLowerCase() === 'c') {
-        // 炮：中炮强
-        if (col === 4) positionVal += 10;
-    }
-    
-    return baseVal + positionVal;
-}
-
-function evaluate(board) {
-    let score = 0;
+// 初始化 Zobrist
+function initZobrist() {
     for (let i = 0; i < 90; i++) {
-        const p = board[i];
+        zobristTable[i] = {};
+        const pieces = ['k','a','b','n','r','c','p','K','A','B','N','R','C','P'];
+        for (let p of pieces) {
+            // 生成 64位 随机整数 (模拟)
+            zobristTable[i][p] = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+        }
+    }
+    turnHash = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+}
+
+// 计算当前局面的 Hash
+function computeHash(currentBoard, currentTurn) {
+    let h = 0n;
+    for (let i = 0; i < 90; i++) {
+        const p = currentBoard[i];
         if (p) {
-            const val = getPieceValue(p, i);
-            if (isRed(p)) score += val; // 红方正分
-            else score -= val;          // 黑方负分
+            h ^= zobristTable[i][p];
         }
     }
-    return score;
+    if (currentTurn === 'black') h ^= turnHash;
+    return h;
 }
 
-// Alpha-Beta 搜索
-function alphaBeta(board, depth, alpha, beta, isMaximizingPlayer) {
-    if (depth === 0) {
-        return evaluate(board);
-    }
+// 执行 AI 移动
+function runAiMove() {
+    const result = iterativeDeepening(board, searchDepth, 'black');
+    isAiThinking = false;
     
-    // 检查游戏结束（王被吃）
-    // 简单检查：看是否有 king missing (这个 check 比较耗时，通常在 move generate 后如果捕捉了王就返回极值)
-    // 这里我们假设 depth 0 的 evaluate 不包含胜负判断，胜负在 move generation 的 capture 里面判断
-    
-    const color = isMaximizingPlayer ? 'red' : 'black';
-    const moves = getValidMoves(board, color);
-    
-    // 排序 moves 提高剪枝效率 (Capture moves first)
-    moves.sort((a, b) => {
-        const pA = board[a.to] ? PIECE_VALUES[board[a.to]] : 0;
-        const pB = board[b.to] ? PIECE_VALUES[board[b.to]] : 0;
-        return pB - pA;
-    });
-
-    if (moves.length === 0) {
-        // 无棋可走，输了
-        return isMaximizingPlayer ? -20000 : 20000;
-    }
-
-    if (isMaximizingPlayer) { // Red
-        let maxEval = -Infinity;
-        for (const move of moves) {
-            const captured = board[move.to];
-            if (captured && captured === 'k') return 100000; // 直接赢
-
-            // Make move
-            board[move.to] = board[move.from];
-            board[move.from] = null;
-            
-            const eval = alphaBeta(board, depth - 1, alpha, beta, false);
-            
-            // Undo move
-            board[move.from] = board[move.to];
-            board[move.to] = captured;
-            
-            maxEval = Math.max(maxEval, eval);
-            alpha = Math.max(alpha, eval);
-            if (beta <= alpha) break;
-        }
-        return maxEval;
-    } else { // Black (AI)
-        let minEval = Infinity;
-        for (const move of moves) {
-            const captured = board[move.to];
-            if (captured && captured === 'K') return -100000; // 直接赢
-
-            // Make move
-            board[move.to] = board[move.from];
-            board[move.from] = null;
-            
-            const eval = alphaBeta(board, depth - 1, alpha, beta, true);
-            
-            // Undo move
-            board[move.from] = board[move.to];
-            board[move.to] = captured;
-            
-            minEval = Math.min(minEval, eval);
-            beta = Math.min(beta, eval);
-            if (beta <= alpha) break;
-        }
-        return minEval;
+    if (result && result.move) {
+        console.log(`AI Move: Depth ${result.depth}, Score ${result.score}`);
+        makeMove(result.move);
+    } else {
+        alert("AI 认输！你赢了！");
+        gameOver = true;
+        updateStatus();
     }
 }
 
-function makeAiMove() {
-    // 简单起见，不使用 Worker，直接计算（会卡顿一下 UI，但 depth=4 还可以接受）
-    // 真正的“大师”通常需要 WebWorker
+// 迭代加深
+function iterativeDeepening(currentBoard, maxDepth, currentTurn) {
+    let bestMove = null;
+    let currentHash = computeHash(currentBoard, currentTurn);
     
     const startTime = Date.now();
-    let bestMove = null;
-    let bestValue = Infinity; // Black wants to minimize score
+    const timeLimit = 3000; // 3秒限制
     
-    // 根节点搜索
-    const moves = getValidMoves(board, 'black');
-    
-    // 排序
-    moves.sort((a, b) => {
-        const pA = board[a.to] ? (PIECE_VALUES[board[a.to]] || 0) : 0;
-        const pB = board[b.to] ? (PIECE_VALUES[board[b.to]] || 0) : 0;
-        return pB - pA;
-    });
-    
-    // 迭代加深（简化版：直接搜固定深度）
-    // 如果是开局，随机性稍微增加一点
-    
-    let alpha = -Infinity;
-    let beta = Infinity;
-    
-    for (const move of moves) {
-        const captured = board[move.to];
+    for (let d = 1; d <= maxDepth; d++) {
+        const result = alphaBeta(currentBoard, d, -Infinity, Infinity, true, currentTurn, currentHash);
         
-        // 如果能吃帅，直接走
-        if (captured === 'K') {
-            bestMove = move;
+        if (Date.now() - startTime > timeLimit && d > 2) {
+            break; // 超时
+        }
+        
+        if (Math.abs(result.score) > 9000) {
+            bestMove = result;
+            bestMove.depth = d;
             break;
         }
-
-        // Make move
-        board[move.to] = board[move.from];
-        board[move.from] = null;
         
-        // 搜索 Red 的回应 (Maximizing)
-        const eval = alphaBeta(board, searchDepth - 1, alpha, beta, true);
+        bestMove = result;
+        bestMove.depth = d;
         
-        // Undo
-        board[move.from] = board[move.to];
-        board[move.to] = captured;
-        
-        if (eval < bestValue) {
-            bestValue = eval;
-            bestMove = move;
-        }
-        beta = Math.min(beta, eval);
+        // 更新 UI 状态（虽然在主线程可能卡住看不见，但逻辑上是需要的）
+        aiStatus.textContent = `AI 思考中 (深度 ${d}, 分数 ${result.score})...`;
     }
     
-    const endTime = Date.now();
-    console.log(`AI thinking time: ${endTime - startTime}ms, Eval: ${bestValue}`);
-    
-    if (bestMove) {
-        makeMove(bestMove);
-    } else {
-        alert("AI 无路可走，你赢了！");
-        gameOver = true;
-    }
+    return bestMove;
 }
 
-// 启动
+// Alpha-Beta with TT
+function alphaBeta(currentBoard, depth, alpha, beta, isMaximizing, currentTurn, hash) {
+    const alphaOrig = alpha;
+
+    // 1. 查询 TT
+    const ttEntry = tt.get(hash);
+    if (ttEntry && ttEntry.depth >= depth) {
+        if (ttEntry.flag === 0) return { score: ttEntry.score, move: ttEntry.bestMove };
+        if (ttEntry.flag === 1) alpha = Math.max(alpha, ttEntry.score);
+        else if (ttEntry.flag === 2) beta = Math.min(beta, ttEntry.score);
+        
+        if (alpha >= beta) return { score: ttEntry.score, move: ttEntry.bestMove };
+    }
+
+    // 终止条件
+    if (depth === 0) {
+        return { score: evaluate(currentBoard, currentTurn), move: null };
+    }
+
+    const moves = getValidMoves(currentBoard, currentTurn);
+    
+    // 3. 游戏结束检测
+    if (moves.length === 0) {
+        return { score: -20000 + (100 - depth), move: null };
+    }
+
+    // 4. 走法排序 (MVV-LVA)
+    moves.sort((a, b) => {
+        const valA = currentBoard[a.to] ? PIECE_VALUES[currentBoard[a.to]] : 0;
+        const valB = currentBoard[b.to] ? PIECE_VALUES[currentBoard[b.to]] : 0;
+        return valB - valA;
+    });
+
+    let bestMove = null;
+    let value = -Infinity;
+
+    for (const move of moves) {
+        const captured = currentBoard[move.to];
+        
+        // 更新 Hash
+        let newHash = hash;
+        newHash ^= zobristTable[move.from][currentBoard[move.from]]; 
+        if (captured) newHash ^= zobristTable[move.to][captured];
+        newHash ^= zobristTable[move.to][currentBoard[move.from]];
+        newHash ^= turnHash;
+
+        // Make move
+        currentBoard[move.to] = currentBoard[move.from];
+        currentBoard[move.from] = null;
+        
+        const nextTurn = currentTurn === 'red' ? 'black' : 'red';
+        
+        // 递归
+        const result = alphaBeta(currentBoard, depth - 1, -beta, -alpha, !isMaximizing, nextTurn, newHash);
+        const score = -result.score;
+        
+        // Undo move
+        currentBoard[move.from] = currentBoard[move.to];
+        currentBoard[move.to] = captured;
+        
+        if (score > value) {
+            value = score;
+            bestMove = move;
+        }
+        
+        alpha = Math.max(alpha, value);
+        if (alpha >= beta) {
+            break; // Beta Cutoff
+        }
+    }
+    
+    // 5. 存储 TT
+    const flag = value <= alphaOrig ? 2 : (value >= beta ? 1 : 0);
+    tt.set(hash, { depth, score: value, flag, bestMove });
+    
+    return { score: value, move: bestMove };
+}
+
+// 评估函数
+function evaluate(currentBoard, currentTurn) {
+    let redScore = 0;
+    let blackScore = 0;
+    
+    for (let i = 0; i < 90; i++) {
+        const p = currentBoard[i];
+        if (!p) continue;
+        
+        const val = getPieceValue(p, i, currentBoard);
+        if (isRed(p)) redScore += val;
+        else blackScore += val;
+    }
+    
+    return currentTurn === 'red' ? (redScore - blackScore) : (blackScore - redScore);
+}
+
+function getPieceValue(piece, index, currentBoard) {
+    const baseVal = PIECE_VALUES[piece];
+    const row = Math.floor(index / 9);
+    const col = index % 9;
+    const isRedPiece = isRed(piece);
+    let posVal = 0;
+
+    const type = piece.toLowerCase();
+    
+    if (type === 'p') { // 兵
+        if (isRedPiece) {
+            if (row < 5) posVal += 30;
+            if (row < 2) posVal += 20;
+            if (row < 5 && (col === 3 || col === 5)) posVal += 20;
+        } else {
+            if (row > 4) posVal += 30;
+            if (row > 7) posVal += 20;
+            if (row > 4 && (col === 3 || col === 5)) posVal += 20;
+        }
+    } else if (type === 'n') { // 马
+        if (col > 2 && col < 6) posVal += 15;
+        if (isRedPiece && index === 85) posVal -= 50; 
+        if (!isRedPiece && index === 4) posVal -= 50;
+    } else if (type === 'c') { // 炮
+        if (col === 4) posVal += 20;
+    } else if (type === 'r') { // 车
+        if (col === 4) posVal += 10;
+        if (isRedPiece && row < 2) posVal += 20;
+        if (!isRedPiece && row > 7) posVal += 20;
+    }
+    
+    return baseVal + posVal;
+}
+
+// 启动游戏
 initGame();
