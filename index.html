@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>中国象棋 - 大师级AI</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="main-container">
+        <div class="game-info">
+            <h1>中国象棋</h1>
+            <div class="status-panel">
+                <div class="turn-indicator" id="turn-indicator">红方走棋</div>
+                <div class="ai-status" id="ai-status">AI 准备中...</div>
+            </div>
+            <div class="controls">
+                <button id="restart-btn" class="btn">重新开始</button>
+                <button id="undo-btn" class="btn">悔棋</button>
+                <div class="difficulty-selector">
+                    <label>难度:</label>
+                    <select id="difficulty">
+                        <option value="2">入门</option>
+                        <option value="3">普通</option>
+                        <option value="4" selected>大师</option>
+                    </select>
+                </div>
+            </div>
+            <div class="history-panel" id="move-history">
+                <!-- 走棋记录 -->
+            </div>
+        </div>
+
+        <div class="board-container">
+            <!-- 棋盘背景 SVG -->
+            <svg class="board-svg" viewBox="0 0 450 500" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <pattern id="grid-pattern" width="50" height="50" patternUnits="userSpaceOnUse">
+                        <path d="M 50 0 L 0 0 0 50" fill="none" stroke="#5c4033" stroke-width="2"/>
+                    </pattern>
+                </defs>
+                
+                <!-- 背景色 -->
+                <rect x="0" y="0" width="450" height="500" fill="#e6cca0"/>
+                
+                <!-- 边框 -->
+                <rect x="25" y="25" width="400" height="450" fill="none" stroke="#5c4033" stroke-width="4"/>
+                
+                <!-- 横线 (Internal rows) -->
+                <path d="M25 75 H425 M25 125 H425 M25 175 H425 M25 225 H425 M25 275 H425 M25 325 H425 M25 375 H425 M25 425 H425" stroke="#5c4033" stroke-width="2"/>
+                
+                <!-- 竖线 (Top half) -->
+                <path d="M75 25 V225 M125 25 V225 M175 25 V225 M225 25 V225 M275 25 V225 M325 25 V225 M375 25 V225" stroke="#5c4033" stroke-width="2"/>
+                
+                <!-- 竖线 (Bottom half) -->
+                <path d="M75 275 V475 M125 275 V475 M175 275 V475 M225 275 V475 M275 275 V475 M325 275 V475 M375 275 V475" stroke="#5c4033" stroke-width="2"/>
+                
+                <!-- 九宫格斜线 -->
+                <path d="M175 25 L275 125 M275 25 L175 125" stroke="#5c4033" stroke-width="2"/>
+                <path d="M175 375 L275 475 M275 375 L175 475" stroke="#5c4033" stroke-width="2"/>
+                
+                <!-- 楚河汉界 -->
+                <text x="110" y="265" font-family="'Ma Shan Zheng', cursive" font-size="30" fill="#5c4033" style="writing-mode: horizontal-tb;">楚 河</text>
+                <text x="280" y="265" font-family="'Ma Shan Zheng', cursive" font-size="30" fill="#5c4033" style="writing-mode: horizontal-tb;">汉 界</text>
+
+                <!-- 炮/兵位置标记 (十字星) -->
+                <!-- 炮 -->
+                <g class="markings">
+                    <path d="M65 115 h10 v10 M85 115 h-10 v10 M65 135 h10 v-10 M85 135 h-10 v-10" stroke="#5c4033" stroke-width="2" fill="none" transform="translate(0,0)"/> <!-- 1,2 -->
+                    <path d="M365 115 h10 v10 M385 115 h-10 v10 M365 135 h10 v-10 M385 135 h-10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/> <!-- 7,2 -->
+                    <path d="M65 365 h10 v10 M85 365 h-10 v10 M65 385 h10 v-10 M85 385 h-10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/> <!-- 1,7 -->
+                    <path d="M365 365 h10 v10 M385 365 h-10 v10 M365 385 h10 v-10 M385 385 h-10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/> <!-- 7,7 -->
+                
+                    <!-- 兵/卒 -->
+                    <path d="M15 165 h10 v10 M15 185 h10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/> <!-- 0,3 (Right half) -->
+                    <path d="M115 165 h10 v10 M135 165 h-10 v10 M115 185 h10 v-10 M135 185 h-10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/> <!-- 2,3 -->
+                    <path d="M215 165 h10 v10 M235 165 h-10 v10 M215 185 h10 v-10 M235 185 h-10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/> <!-- 4,3 -->
+                    <path d="M315 165 h10 v10 M335 165 h-10 v10 M315 185 h10 v-10 M335 185 h-10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/> <!-- 6,3 -->
+                    <path d="M425 165 h10 v10 M425 185 h10 v-10" transform="scale(-1, 1) translate(-450, 0)" stroke="#5c4033" stroke-width="2" fill="none"/> <!-- 8,3 (Left half) -->
+
+                    <!-- 下半部分兵 -->
+                    <path d="M15 315 h10 v10 M15 335 h10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/> 
+                    <path d="M115 315 h10 v10 M135 315 h-10 v10 M115 335 h10 v-10 M135 335 h-10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/>
+                    <path d="M215 315 h10 v10 M235 315 h-10 v10 M215 335 h10 v-10 M235 335 h-10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/>
+                    <path d="M315 315 h10 v10 M335 315 h-10 v10 M315 335 h10 v-10 M335 335 h-10 v-10" stroke="#5c4033" stroke-width="2" fill="none"/>
+                    <path d="M425 315 h10 v10 M425 335 h10 v-10" transform="scale(-1, 1) translate(-450, 0)" stroke="#5c4033" stroke-width="2" fill="none"/>
+                </g>
+            </svg>
+            
+            <div id="board" class="board">
+                <!-- 棋子将通过 JS 动态生成 -->
+            </div>
+        </div>
+    </div>
+    
+    <!-- 音效 -->
+    <audio id="move-sound" src="data:audio/mp3;base64,//NExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//NExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" style="display:none;"></audio>
+    <!-- 注意：为了演示方便，这里没有放置真实的音频Base64。实际项目中应该引入真实音频文件 -->
+
+    <script src="script.js"></script>
+</body>
+</html>
