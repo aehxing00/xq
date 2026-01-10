@@ -42,6 +42,7 @@ let history = [];
 let gameOver = false;
 let searchDepth = 4; // AI 搜索深度
 let isAiThinking = false;
+let isAnimating = false;
 
 // AI 全局变量
 let zobristTable = [];
@@ -161,7 +162,7 @@ function playSound() {
 
 // --- 交互逻辑 ---
 function handleCellClick(index) {
-    if (gameOver || turn === 'black' || isAiThinking) return;
+    if (gameOver || turn === 'black' || isAiThinking || isAnimating) return;
 
     const piece = board[index];
     
@@ -193,37 +194,57 @@ function makeMove(move) {
         turn: turn
     });
 
-    // 简易动画效果
-    // 找到移动前的棋子 DOM
-    // 由于我们每次 renderBoard 都是重绘，这里的动画需要一点技巧
-    // 方案：先不重绘，计算位置差，应用 transform，transitionend 后再重绘数据
-    
+    // 动画逻辑
     const fromCell = boardEl.children[move.from];
-    const pieceEl = fromCell.querySelector('.piece');
-    
-    if (pieceEl) {
-        const toCell = boardEl.children[move.to];
+    const toCell = boardEl.children[move.to];
+    const p = board[move.from];
+
+    if (fromCell && toCell && p) {
+        isAnimating = true;
+        const startRect = fromCell.getBoundingClientRect();
+        const endRect = toCell.getBoundingClientRect();
+        const boardRect = boardEl.getBoundingClientRect();
         
-        // 计算距离
-        const fromRect = fromCell.getBoundingClientRect();
-        const toRect = toCell.getBoundingClientRect();
-        const dx = toRect.left - fromRect.left;
-        const dy = toRect.top - fromRect.top;
+        // 创建飞行棋子
+        const flyer = document.createElement('div');
+        flyer.className = `piece ${isRed(p) ? 'red' : 'black'} piece-moving`;
+        flyer.textContent = PIECE_CHARS[p];
         
-        // 应用动画类
-        pieceEl.classList.add('piece-moving');
-        pieceEl.style.transform = `translate(${dx}px, ${dy}px)`;
+        // 计算初始位置 (相对于 boardEl)
+        // .piece 默认有 left: 3px, top: 3px
+        const startLeft = startRect.left - boardRect.left + 3;
+        const startTop = startRect.top - boardRect.top + 3;
         
-        // 播放声音
+        flyer.style.left = `${startLeft}px`;
+        flyer.style.top = `${startTop}px`;
+        
+        boardEl.appendChild(flyer);
+        
+        // 隐藏原始棋子
+        const originalPiece = fromCell.querySelector('.piece');
+        if (originalPiece) originalPiece.style.opacity = '0';
+        
+        // 强制回流
+        flyer.getBoundingClientRect();
+        
+        // 计算位移并应用 transform
+        const dx = (endRect.left - boardRect.left + 3) - startLeft;
+        const dy = (endRect.top - boardRect.top + 3) - startTop;
+        
+        flyer.style.transform = `translate(${dx}px, ${dy}px)`;
+        
         playSound();
         
-        // 等待动画结束更新数据
+        // 动画结束后更新状态
         setTimeout(() => {
+            flyer.remove();
             finishMove(move, captured);
-        }, 300); // 300ms 与 CSS transition 一致
+            isAnimating = false;
+        }, 300);
     } else {
-        // Fallback if no element (e.g. AI fast move)
+        // Fallback
         finishMove(move, captured);
+        isAnimating = false;
     }
 }
 
@@ -612,7 +633,7 @@ function iterativeDeepening(currentBoard, maxDepth, currentTurn) {
     let currentHash = computeHash(currentBoard, currentTurn);
     
     const startTime = Date.now();
-    const timeLimit = 3000; // 3秒限制
+    const timeLimit = 5000; // 5秒限制
     
     for (let d = 1; d <= maxDepth; d++) {
         const result = alphaBeta(currentBoard, d, -Infinity, Infinity, true, currentTurn, currentHash);
